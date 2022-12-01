@@ -7,7 +7,7 @@ output:
   html_document: default
 ---
 ```{r setup}
-#install.packages("EloRating", "cluster", "factoextra", "finalfit", "recipes", "tidyverse")
+#install.packages("EloRating", "cluster", "factoextra", "finalfit", "recipes", "tidyverse", "caret", "recipes", "tidyverse", "cutpointr", "initial_split", "gbm")
 library(here)
 library(EloRating)
 library(tidyverse)
@@ -16,6 +16,11 @@ library(factoextra)
 library(finalfit)
 library(recipes)
 library(tidyverse)
+library(caret)
+library(recipes)
+library(tidyverse)
+library(cutpointr)
+library(janitor)
 
 ```
 
@@ -30,7 +35,8 @@ str(mmaData)
 
 #Generate unique fighter and opponent IDs
 modernMMAData <- modernMMAData %>% mutate(fighterID=paste(date, fighter),
-                                          opponentID=paste(date, opponent))
+                                          opponentID=paste(date, opponent),
+                                          result=if_else(result==0, "Loss", "Win"))
 
 ```
 
@@ -51,8 +57,8 @@ modernMMAData <- modernMMAData %>% dplyr::select(-dplyr::ends_with("differential
 #Get elo ratings for fighters
 ```{r}
 eloRatings <- modernMMAData %>% dplyr::select(date, result, fighter, fighterID, opponent)
-eloRatings <- eloRatings %>% mutate(winner = ifelse(result==1, fighter, opponent),
-                                    loser = ifelse(result==0, fighter, opponent),
+eloRatings <- eloRatings %>% mutate(winner = ifelse(result=="Win", fighter, opponent),
+                                    loser = ifelse(result=="Loss", fighter, opponent),
                                     date=as.Date(date))
 
 
@@ -88,7 +94,7 @@ scaledClusterDF <- scale(new)
 #Will use 3 clusters
 
 k <- kmeans(scaledClusterDF, centers = 3, iter.max = 20, nstart = 20)
-k <- k$cluster
+k <- as.character(k$cluster)
 
 modernMMAData <- modernMMAData %>% filter(!is.na(recent_avg_body_strikes_landed_per_min))
 modernMMAData <- modernMMAData %>% mutate(cluster = k)
@@ -113,58 +119,360 @@ modernMMAData <- modernMMAData %>% mutate(clusterMatchup = paste(cluster.fighter
 #Add eloDifference
 modernMMAData <- modernMMAData %>% mutate(eloDifference = precompElo.fighter-precompElo.opponent)
 
+modernMMAData <- modernMMAData %>% clean_names() %>% data.frame()
+modernMMAData <-modernMMAData %>% relocate(where(is.numeric), .after = where(is.character))
+modernMMAData <- modernMMAData %>% filter(!is.na(precomp_elo_fighter)&!is.na(precomp_elo_opponent))
+
+modernMMAData2 <- modernMMAData %>% select(-c(5:15))
 ```
 
 
-**Task 1.2** Use the following recipe object to complete the remaining tasks.
+#Split data into test and training
+```{r}
+set.seed(10312022)
+
+loc      <- sample(1:nrow(modernMMAData2), round(nrow(modernMMAData2) * 0.8))
+trainSet  <- data.frame(modernMMAData2[loc, ])
+testSet  <- data.frame(modernMMAData2[-loc, ])
+```
+
+```{r}
+finalfit::ff_glimpse(modernMMAData2)
+```
+
+
+#Recipe
+```{r}
+
+
+blueprint_mma <- recipe(x  = modernMMAData2,
+                          vars  = colnames(modernMMAData2),
+                          roles = c('id', 'outcome', 'id', 'id',rep('predictor',209))) %>%
+  step_dummy('cluster_matchup',one_hot=TRUE) %>% 
+  step_dummy('stance_matchup',one_hot=TRUE) %>% 
+  step_impute_mean(all_numeric()) %>%
+  step_zv(all_numeric())
+
+```
+
+
+```{r}
+set.seed(10312022)
+# Randomly shuffle the training dataset
+
+  trainSet = trainSet[sample(nrow(trainSet)),]
+
+# Create 10 folds with equal size
+
+  folds = cut(seq(1,nrow(trainSet)),breaks=10,labels=FALSE)
+  
+# Create the list for each fold 
+      
+  my.indices <- vector('list',10)
+
+  for(i in 1:10){
+    my.indices[[i]] <- which(folds!=i)
+  }
+
+
+cv <- trainControl(method          = "cv",
+                   index           = my.indices,
+                   classProbs = TRUE,
+                   summaryFunction = mnLogLoss)
+
+grid <- data.frame(alpha = 0, lambda = c(seq(0,.1,.005))) 
+
+noreg <- caret::train(blueprint_mma, 
+                          data      = trainSet, 
+                          method    = "glmnet",
+                          family    = "binomial",
+                          metric    = "logLoss",
+                          trControl = cv)
+
+ridge <- caret::train(blueprint_mma, 
+                          data      = trainSet, 
+                          method    = "glmnet",
+                          family    = "binomial",
+                          metric    = "logLoss",
+                          trControl = cv,
+                      tuneGrid = grid)
+
+```
+
+
+#Run predictions for nonregularized model
+```{r}
+predicted_test <- predict(noreg, testSet, type='prob')
+
+cut.obj <- cutpointr(x     = predicted_test$Win,
+                     class = testSet$result)
+
+auc(cut.obj)
+noregAUC<-auc(cut.obj)
+
+pred_class <- ifelse(predicted_test$Win>.5,1,0)
+
+confusion <- table(testSet$result,pred_class)
+
+confusion
+
+noregTPR<- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+noregTNR<- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+noregPRE<-confusion[2,2]/(confusion[1,2]+confusion[2,2])
+noregACC<- (confusion[1,1]+confusion[2,2])/(confusion[1,1]+confusion[1,2]+confusion[2,1]+confusion[2,2])
+
+noregTPR
+noregTNR
+noregPRE
+noregLL<-noreg$results$logLoss
+
+
+
+noregMetrics<-c(noregLL, noregAUC, noregACC, noregTPR, noregTNR, noregPRE)
+
+```
+
+#Run predictions for ridge model
+```{r}
+predicted_test <- predict(ridge, testSet, type='prob')
+
+cut.obj <- cutpointr(x     = predicted_test$Win,
+                     class = testSet$result)
+
+auc(cut.obj)
+ridgeAUC<-auc(cut.obj)
+
+pred_class <- ifelse(predicted_test$Win>.5,1,0)
+
+confusion <- table(testSet$result,pred_class)
+
+confusion
+
+ridgeTPR<- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+ridgeTNR<- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+ridgePRE<-confusion[2,2]/(confusion[1,2]+confusion[2,2])
+ridgeACC<- (confusion[1,1]+confusion[2,2])/(confusion[1,1]+confusion[1,2]+confusion[2,1]+confusion[2,2])
+
+ridgeTPR
+ridgeTNR
+ridgePRE
+ridgeLL<-ridge$results$logLoss
+
+
+
+ridgeMetrics<-c(ridgeLL, ridgeAUC, ridgeACC, ridgeTPR, ridgeTNR, ridgePRE)
+
+```
+
+
+#Gradient Boosted Forest
+
+#Recipe
+```{r}
+
+
+blueprint_mma <- recipe(x  = modernMMAData2,
+                          vars  = colnames(modernMMAData2),
+                          roles = c('id', 'outcome', 'id', 'id',rep('predictor',209))) %>%
+  step_dummy('cluster_matchup',one_hot=TRUE) %>% 
+  step_dummy('stance_matchup',one_hot=TRUE) %>% 
+  step_impute_mean(all_numeric()) %>%
+  step_zv(all_numeric())
+
+
+
+```
+
+```{r}
+set.seed(10312022)
+
+loc      <- sample(1:nrow(modernMMAData2), round(nrow(modernMMAData2) * 0.8))
+trainSet  <- data.frame(modernMMAData2[loc, ])
+testSet  <- data.frame(modernMMAData2[-loc, ])
+```
 
 ```{r}
 
-result <- recipe(x  = modernMMAData,
-                          vars  = colnames(modernMMAData),
-                          roles = c('id', 'result', 'id', 'id', 'id', 'id',rep('predictor',218))) %>%
-  step_dummy('clusterMatchup',one_hot=TRUE) %>% 
-  step_dummy('stanceMatchup',one_hot=TRUE)
+set.seed(10312022)
+# Randomly shuffle the training dataset
 
-# result <- recipe(x  = modernMMAData,
-#                           vars  = colnames(modernMMAData),
-#                           roles = c('id', 'id', 'id', 'outcome',rep('predictor',526))) %>%
-#   step_dummy('month',one_hot=TRUE) %>% 
-#   step_harmonic('day',frequency=1,cycle_size=7, role='predictor') %>%
-#   step_harmonic('date',frequency=1,cycle_size=31,role='predictor') %>%
-#   step_harmonic('hour',frequency=1,cycle_size=24,role='predictor') %>%
-#   step_normalize(paste0('V',1:768)) %>%
-#   step_normalize(c('day_sin_1','day_cos_1',
-#                    'date_sin_1','date_cos_1',
-#                    'hour_sin_1','hour_cos_1')) %>%
-#   step_num2factor(sentiment,
-#                   transform = function(x) x + 1,
-#                   levels=c('Negative','Positive'))
+  trainSet = trainSet[sample(nrow(trainSet)),]
 
-#View(blueprint_tweet %>% prep() %>% summary)
+# Create 10 folds with equal size
+
+  folds = cut(seq(1,nrow(trainSet)),breaks=10,labels=FALSE)
+  
+# Create the list for each fold 
+      
+  my.indices <- vector('list',10)
+
+  for(i in 1:10){
+    my.indices[[i]] <- which(folds!=i)
+  }
+
+
+cv <- trainControl(method          = "cv",
+                   index           = my.indices,
+                   classProbs = TRUE,
+                   summaryFunction = mnLogLoss)
+
+
 ```
 
-**Task 1.3** Split the original data into two subsets: training and test. Let the training data have the 80% of cases and the test data have the  20% of the cases. Set the seed to **10312022** for any random sampling process before splitting data.
+#Tune number of trees
+```{r}
+grid <- expand.grid(shrinkage         = 0.1,
+                    n.trees           = 1:1000,
+                    interaction.depth = 5,
+                    n.minobsinnode    = 10)
+
+
+gbm1 <- caret::train(blueprint_mma,
+                     data         = trainSet,
+                     method       = 'gbm',
+                     trControl    = cv,
+                     tuneGrid     = grid,
+                     bag.fraction = 1,
+                     metric       = 'logLoss')
+
+plot(gbm1,type='l')
+
+gbm1$bestTune
+
+```
+
+```{r}
+grid <- expand.grid(shrinkage         = 0.1,
+                    n.trees           = 136,
+                    interaction.depth = 1:15,
+                    n.minobsinnode    = c(5,10,20,30,40,50))
+
+gbm2 <- caret::train(blueprint_mma,
+                     data         = trainSet,
+                     method       = 'gbm',
+                     trControl    = cv,
+                     tuneGrid     = grid,
+                     bag.fraction = 1,
+                     metric       = 'logLoss')
+
+plot(gbm2)
+
+gbm2$bestTune
+```
+
+```{r}
+grid <- expand.grid(shrinkage         = 0.01,
+                    n.trees           = 1:10000,
+                    interaction.depth = 10,
+                    n.minobsinnode    = 10)
+
+
+gbm3 <- caret::train(blueprint_mma,
+                     data         = trainSet,
+                     method       = 'gbm',
+                     trControl    = cv,
+                     tuneGrid     = grid,
+                     bag.fraction = 1,
+                     metric       = 'logLoss')
+
+plot(gbm3,type='l')
+
+gbm3$bestTune
+
+```
+
+#Tune bag fraction
+```{r}
+grid <- expand.grid(shrinkage         = 0.01,
+                    n.trees           = 1162,
+                    interaction.depth = 10,
+                    n.minobsinnode    = 10)
+
+bag.fr <- seq(0.1,1,.05)
+
+my.models <- vector('list',length(bag.fr))
+
+for(i in 1:length(bag.fr)){
+  
+  my.models[[i]] <- caret::train(blueprint_mma,
+                                 data      = trainSet,
+                                 method    = 'gbm',
+                                 trControl = cv,
+                                 tuneGrid  = grid,
+                                 bag.fraction = bag.fr[i])
+}
+cv.LogL <- c()
+
+for(i in 1:length(bag.fr)){
+  cv.LogL[i] <- my.models[[i]]$results$logLoss
+}
+
+ggplot()+
+  geom_line(aes(x=bag.fr,y=cv.LogL))+
+  theme_bw()+
+  xlab('Bag Fraction')+
+  ylab('LogLoss (Cross-validated)')+
+  scale_x_continuous(breaks = bag.fr)
+
+bag.fr[which.min(cv.LogL)]
+
+#.7
+```
+
+#Predict test set
+```{r}
+final.gbm <- my.models[[13]]
+
+# Predict the probabilities for the observations in the test dataset
+
+predicted_test <- predict(final.gbm, testSet, type='prob')
+
+head(predicted_test)
+
+```
 
 ```{r}
 
-```
+require(cutpointr)
 
-**Task 1.4. Logistic Regression with No Regularization:** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression without any regularization. When fitting the model, Use `logLoss` as a metric for optimization. Evaluate and report the performance of the model on the test dataset (AUC, True positive rate, True Negative Rate, Precision).
+cut.obj <- cutpointr(x     = predicted_test$Win,
+                     class = testSet$result)
+
+gradientAUC <- auc(cut.obj)
+
+
+pred_class <- ifelse(predicted_test$Win>.5,1,0)
+
+confusion <- table(testSet$result,pred_class)
+
+confusion[1,1]/(confusion[1,1]+confusion[1,2])
+
+confusion[1,2]/(confusion[1,1]+confusion[1,2])
+
+
+confusion[2,2]/(confusion[2,1]+confusion[2,2])
+
+
+confusion[2,2]/(confusion[1,2]+confusion[2,2])
+
+confusion
+```
 
 ```{r}
+gradientTPR<- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+gradientTNR<- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+gradientPRE<-confusion[2,2]/(confusion[1,2]+confusion[2,2])
+gradientACC<- (confusion[1,1]+confusion[2,2])/(confusion[1,1]+confusion[1,2]+confusion[2,1]+confusion[2,2])
+
+gradientTPR
+gradientTNR
+gradientPRE
+gradientLL<-ridge$results$logLoss
+
+
+gradientAUC
+gradientMetrics<-c(gradientLL, gradientAUC, gradientACC, gradientTPR, gradientTNR, gradientPRE)
 
 ```
-
-
-**Task 1.5. Logistic Regression with Ridge Penalty:** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression with **ridge penalty**. Try different values of ridge penalty to decide the optimal value. Use `logLoss` as a metric for optimization. Plot the results, and report the optimal value of ridge penalty.
-
-```{r}
-
 ```
 
-**Task 1.6. Logistic Regression with Lasso Penalty** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression with **lasso penalty**. Try different values of lasso penalty to decide optimal value. Use `logLoss` as a metric for optimization. Plot the results, and report the optimal value of lasso penalty.
-
-```{r}
-
-```
