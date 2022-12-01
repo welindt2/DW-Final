@@ -1,0 +1,170 @@
+---
+title: "Final - EDLD 654"
+author: "Dillon Welindt"
+date: "Date"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup}
+#install.packages("EloRating", "cluster", "factoextra", "finalfit", "recipes", "tidyverse")
+library(here)
+library(EloRating)
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(finalfit)
+library(recipes)
+library(tidyverse)
+
+```
+
+
+```{r}
+mmaData <- read.csv(here("mmadata.csv"),
+                       header=TRUE)
+
+modernMMAData <- mmaData %>% filter(date>"2010-01-01")
+str(mmaData)
+
+
+#Generate unique fighter and opponent IDs
+modernMMAData <- modernMMAData %>% mutate(fighterID=paste(date, fighter),
+                                          opponentID=paste(date, opponent))
+
+```
+
+```{r}
+#ff_glimpse(modernMMAData)
+```
+
+#Subset data to relevant predictors
+```{r}
+modernMMAData <- modernMMAData %>% mutate(reachDifference = reach_differential,
+                                          ageDifference = age_differential,
+                                          heightDifference = height_differential)
+modernMMAData <- modernMMAData %>% dplyr::select(date, result, fighter, fighterID, opponent, stance, reachDifference, ageDifference, heightDifference, 124:535)
+modernMMAData <- modernMMAData %>% dplyr::select(-dplyr::ends_with("differential", ignore.case = TRUE))%>% dplyr::select(-dplyr::ends_with("accuracy", ignore.case = TRUE)) %>% dplyr::select(-dplyr::starts_with("precomp", ignore.case = TRUE))
+```
+
+
+#Get elo ratings for fighters
+```{r}
+eloRatings <- modernMMAData %>% dplyr::select(date, result, fighter, fighterID, opponent)
+eloRatings <- eloRatings %>% mutate(winner = ifelse(result==1, fighter, opponent),
+                                    loser = ifelse(result==0, fighter, opponent),
+                                    date=as.Date(date))
+
+
+seqcheck(winner = eloRatings$winner, loser = eloRatings$loser, Date = eloRatings$date)
+
+res <- elo.seq(winner = eloRatings$winner, loser = eloRatings$loser, Date = eloRatings$date, runcheck = TRUE)
+ 
+summary(res)
+
+elos <- extract_elo(res, extractdate = eloRatings$date, IDs = eloRatings$fighter)
+eloRatings <- eloRatings %>% mutate(elo=elos)
+
+lastElo <- eloRatings %>% group_by(fighter) %>% mutate(precompElo=lag(elo)) %>% ungroup()
+lastElo <- lastElo %>% dplyr::select(fighterID, precompElo)
+
+modernMMAData <- left_join(
+  modernMMAData,
+  dplyr::select(lastElo, c('fighterID', 'precompElo')),
+  by = c("fighterID" = "fighterID")
+)
+
+```
+
+```{r}
+#Prepare data for cluster analysis
+new <- modernMMAData %>% dplyr::select(recent_avg_knockdowns:recent_avg_ground_strikes_attempts_per_min)
+new <- new %>% filter(!is.na(recent_avg_body_strikes_landed_per_min))
+scaledClusterDF <- scale(new)
+
+#Check on appropriate number of clusters
+#fviz_nbclust(scaledClusterDF, FUNcluster = kmeans, method = "silhouette")
+#fviz_nbclust(scaledClusterDF, FUNcluster = kmeans, method = "wss")
+#Will use 3 clusters
+
+k <- kmeans(scaledClusterDF, centers = 3, iter.max = 20, nstart = 20)
+k <- k$cluster
+
+modernMMAData <- modernMMAData %>% filter(!is.na(recent_avg_body_strikes_landed_per_min))
+modernMMAData <- modernMMAData %>% mutate(cluster = k)
+```
+
+
+```{r}
+modernMMAData <- left_join(
+  modernMMAData,
+  modernMMAData,
+  by = c("opponentID" = "fighterID"),
+  suffix = c(".fighter", ".opponent")
+)
+
+#Add code for type of stance matchup
+stances <- c("Orthodox", "Southpaw", "Switch")
+modernMMAData <- modernMMAData %>% filter(stance.fighter %in% stances) %>% filter(stance.opponent %in% stances) %>% mutate(stanceMatchup = paste(stance.fighter, stance.opponent))
+
+#Add code for type of cluster matchup
+modernMMAData <- modernMMAData %>% mutate(clusterMatchup = paste(cluster.fighter, cluster.opponent))
+
+#Add eloDifference
+modernMMAData <- modernMMAData %>% mutate(eloDifference = precompElo.fighter-precompElo.opponent)
+
+```
+
+
+**Task 1.2** Use the following recipe object to complete the remaining tasks.
+
+```{r}
+
+result <- recipe(x  = modernMMAData,
+                          vars  = colnames(modernMMAData),
+                          roles = c('id', 'result', 'id', 'id', 'id', 'id',rep('predictor',218))) %>%
+  step_dummy('clusterMatchup',one_hot=TRUE) %>% 
+  step_dummy('stanceMatchup',one_hot=TRUE)
+
+# result <- recipe(x  = modernMMAData,
+#                           vars  = colnames(modernMMAData),
+#                           roles = c('id', 'id', 'id', 'outcome',rep('predictor',526))) %>%
+#   step_dummy('month',one_hot=TRUE) %>% 
+#   step_harmonic('day',frequency=1,cycle_size=7, role='predictor') %>%
+#   step_harmonic('date',frequency=1,cycle_size=31,role='predictor') %>%
+#   step_harmonic('hour',frequency=1,cycle_size=24,role='predictor') %>%
+#   step_normalize(paste0('V',1:768)) %>%
+#   step_normalize(c('day_sin_1','day_cos_1',
+#                    'date_sin_1','date_cos_1',
+#                    'hour_sin_1','hour_cos_1')) %>%
+#   step_num2factor(sentiment,
+#                   transform = function(x) x + 1,
+#                   levels=c('Negative','Positive'))
+
+#View(blueprint_tweet %>% prep() %>% summary)
+```
+
+**Task 1.3** Split the original data into two subsets: training and test. Let the training data have the 80% of cases and the test data have the  20% of the cases. Set the seed to **10312022** for any random sampling process before splitting data.
+
+```{r}
+
+```
+
+**Task 1.4. Logistic Regression with No Regularization:** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression without any regularization. When fitting the model, Use `logLoss` as a metric for optimization. Evaluate and report the performance of the model on the test dataset (AUC, True positive rate, True Negative Rate, Precision).
+
+```{r}
+
+```
+
+
+**Task 1.5. Logistic Regression with Ridge Penalty:** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression with **ridge penalty**. Try different values of ridge penalty to decide the optimal value. Use `logLoss` as a metric for optimization. Plot the results, and report the optimal value of ridge penalty.
+
+```{r}
+
+```
+
+**Task 1.6. Logistic Regression with Lasso Penalty** Use the `caret::train()` function to train a model with 10-fold cross-validation for predicting the probability of sentiment being positive using logistic regression with **lasso penalty**. Try different values of lasso penalty to decide optimal value. Use `logLoss` as a metric for optimization. Plot the results, and report the optimal value of lasso penalty.
+
+```{r}
+
+```
