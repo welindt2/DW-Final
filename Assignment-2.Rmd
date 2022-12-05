@@ -3,8 +3,8 @@ title: "Final - EDLD 654"
 author: "Dillon Welindt"
 date: "Date"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 ```{r setup}
 #install.packages("EloRating", "cluster", "factoextra", "finalfit", "recipes", "tidyverse", "caret", "recipes", "tidyverse", "cutpointr", "initial_split", "gbm")
@@ -416,12 +416,12 @@ ggplot()+
 
 bag.fr[which.min(cv.LogL)]
 
-#.7
+#.55
 ```
 
 #Predict test set
 ```{r}
-final.gbm <- my.models[[13]]
+final.gbm <- my.models[[10]]
 
 # Predict the probabilities for the observations in the test dataset
 
@@ -474,5 +474,26 @@ gradientAUC
 gradientMetrics<-c(gradientLL, gradientAUC, gradientACC, gradientTPR, gradientTNR, gradientPRE)
 
 ```
+```
+```{r}
+citation(package = "base", lib.loc = NULL, auto = NULL)
+citation(package = "here")
+
+citation("EloRating")
+citation("cluster")
+citation("factoextra")
+citation("finalfit")
+citation("recipes")
+citation("tidyverse")
+citation("caret")
+citation("recipes")
+citation("tidyverse")
+citation("cutpointr")
+citation("gbm")
+
+
+
+
+
 ```
 
