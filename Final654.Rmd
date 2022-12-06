@@ -21,6 +21,7 @@ library(recipes)
 library(tidyverse)
 library(cutpointr)
 library(janitor)
+library(ggplot2)
 
 ```
 
@@ -80,6 +81,10 @@ modernMMAData <- left_join(
   by = c("fighterID" = "fighterID")
 )
 
+hist(lastElo$precompElo,
+     xlab = "Elo Rating before Fight",
+     ylab = "Frequency")
+
 ```
 
 ```{r}
@@ -94,7 +99,12 @@ scaledClusterDF <- scale(new)
 #Will use 3 clusters
 
 k <- kmeans(scaledClusterDF, centers = 3, iter.max = 20, nstart = 20)
+cluster <- k$cluster
 k <- as.character(k$cluster)
+table(k)
+barplot(table(k),
+        xlab = "Cluster",
+        ylab = "Count")
 
 modernMMAData <- modernMMAData %>% filter(!is.na(recent_avg_body_strikes_landed_per_min))
 modernMMAData <- modernMMAData %>% mutate(cluster = k)
@@ -228,7 +238,7 @@ noregLL<-noreg$results$logLoss
 
 
 
-noregMetrics<-c(noregLL, noregAUC, noregACC, noregTPR, noregTNR, noregPRE)
+noregMetrics<-c(noregAUC, noregACC, noregTPR, noregTNR, noregPRE)
 
 ```
 
@@ -260,7 +270,7 @@ ridgeLL<-ridge$results$logLoss
 
 
 
-ridgeMetrics<-c(ridgeLL, ridgeAUC, ridgeACC, ridgeTPR, ridgeTNR, ridgePRE)
+ridgeMetrics<-c(ridgeAUC, ridgeACC, ridgeTPR, ridgeTNR, ridgePRE)
 
 ```
 
@@ -434,7 +444,8 @@ grid <- expand.grid(shrinkage         = 0.01,
 
 #.55
 ```
-```
+
+
 #Predict test set
 ```{r}
 
@@ -443,17 +454,15 @@ grid <- expand.grid(shrinkage         = 0.01,
 predicted_test <- predict(gbmModel, testSet, type='prob')
 
 head(predicted_test)
-
 ```
 
 ```{r}
-
 require(cutpointr)
 
-cut.obj <- cutpointr(x     = predicted_test$Win,
+cut.objGBM <- cutpointr(x     = predicted_test$Win,
                      class = testSet$result)
 
-gradientAUC <- auc(cut.obj)
+gbmAUC <- auc(cut.obj)
 
 
 pred_class <- ifelse(predicted_test$Win>.5,1,0)
@@ -474,22 +483,30 @@ confusion
 ```
 
 ```{r}
-gradientTPR<- confusion[2,2]/(confusion[2,1]+confusion[2,2])
-gradientTNR<- confusion[1,1]/(confusion[1,1]+confusion[1,2])
-gradientPRE<-confusion[2,2]/(confusion[1,2]+confusion[2,2])
-gradientACC<- (confusion[1,1]+confusion[2,2])/(confusion[1,1]+confusion[1,2]+confusion[2,1]+confusion[2,2])
+gbmTPR<- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+gbmTNR<- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+gbmPRE<-confusion[2,2]/(confusion[1,2]+confusion[2,2])
+gbmACC<- (confusion[1,1]+confusion[2,2])/(confusion[1,1]+confusion[1,2]+confusion[2,1]+confusion[2,2])
 
-gradientTPR
-gradientTNR
-gradientPRE
-gradientLL<-ridge$results$logLoss
+gbmTPR
+gbmTNR
+gbmPRE
+gbmLL<-ridge$results$logLoss
 
 
-gradientAUC
-gradientMetrics<-c(gradientLL, gradientAUC, gradientACC, gradientTPR, gradientTNR, gradientPRE)
+gbmAUC
+gbmMetrics<-c(gbmAUC, gbmACC, gbmTPR, gbmTNR, gbmPRE)
 
 ```
+
+```{r}
+performanceTable2<-rbind(noregMetrics,ridgeMetrics, gbmMetrics)
+colnames(performanceTable2)<-c("AUC","ACC", "TPR", "TNR", "PRE")
+rownames(performanceTable2)<-c("Logistic Regression", "Logistic Regression with Ridge Penalty", "Gradient Boosted")
+performanceTable2
 ```
+
+
 ```{r}
 citation(package = "base", lib.loc = NULL, auto = NULL)
 citation(package = "here")
@@ -507,8 +524,9 @@ citation("cutpointr")
 citation("gbm")
 
 
+plot_roc(cut.objGBM$roc_curve[[1]])
 
-
+vip::vip(gbmModel)
 
 ```
 
